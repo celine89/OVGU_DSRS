@@ -1,0 +1,783 @@
+---
+title: "Foursquare_Project"
+output: html_document
+---
+```{r setup, include=FALSE, cache=TRUE}
+```
+```{r load USData, include=FALSE}
+load("JP_Data.RData")
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(chron)
+library(maps)
+library(mapdata)
+library(ggmap)
+library(plotly)
+library(leaflet)
+library(scales)
+library(osmdata)
+library(sitools)
+library(arules)
+library(RColorBrewer)
+library(arulesViz)
+library(geosphere)
+library(networkD3)
+library(tibble)
+library(tidyverse)
+library(factoextra)
+library(clValid)
+library(revgeo)
+library(dbscan)
+```
+### Introduction
+* #### Motivation and Goals:
+Social networks have become an everyday activity in people's life, people now can communicate, share their day life activities with their family and friends using online social media (OSN) applications and in consequence Social Networking became a very wide and rich topic for research and analysis for businesses and researchers in different fields.\
+The continuous development of location acquisition and mobile communication technologies empowered people to use location data with existing online social networks in a variety of ways leading to the birth of a field called Location Based Social Networks (LBSN).\
+Here, the physical location consists of the instant location of an individual at a given timestamp and the location history that an individual has accumulated in a certain period. Further, the interdependency includes not only that two persons co-occur in the same physical location or share similar location histories but also the knowledge, e.g., common interests, behaviour, and activities, inferred from an individual's location (history) and location-tagged data.[^1] \
+One of the pioneers in the field of Location-Based Social Networks is Foursquare. Foursquare is a platform that was launched in 2009 and now it has around 60 million users.\
+In a time of 2 years Foursquare was named Best Location-Based Service in the TechCrunch Crunchies and named a Technology Pioneer by the World Economic Forum in the Information Technologies and New Media category according to [Wikipedia's page on Foursquare](https://en.wikipedia.org/wiki/Foursquare).
+\
+Our motive in this seminar is to combine frequent and sequential pattern mining with clustering techniques to be able to construct a solid ground of analysis on foursquare dataset that can be later injected in recommender system engines to improve quality of recommendations for users and businesses.\
+\
+
+* #### Initial questions:
+  + What are the favorite types of activities for people in the country in general (main categories like restaurant,...etc) ?\
+  + What is the ditribution of these activities across variable time dimensions [hour, day, month] ?\
+  + How are these activities related in terms of distance ? What are the activities that usually exist near each others ?\
+  + How are these activities related in terms of time ? What are activities that usually happens during simillar times?\
+  + What are interesting patterns of activity check-ins ?\
+  + How can we combine different analysis to be used for different recommendations for users and businesses?\
+\
+
+* #### Data Source:
+For our project we explored the data from foursquare for global check-ins data, the data spanned about 18 months from April 2012 to September 2013.\
+\
+It contains 33,278,683 checkins by 266,909 users on 3,680,126 venues (in 415 cities in 77 countries).\
+\
+We got the data-set from [Dingqi YANG's webpage](https://sites.google.com/site/yangdingqi/home/foursquare-dataset), a Senior Researcher at the University of Fribourg in Switzerland.\
+\
+  + File dataset_TIST2015_Checkins.txt contains all check-ins with 4 columns, which are:
+    1. User ID (anonymized)
+    2. Venue ID (Foursquare)
+    3. UTC time
+    4. Timezone offset in minutes (The offset in minutes between when this check-sin occurred and the same time in UTC, i.e., UTC time + offset is the local time)
+\
+  + File dataset_TIST2015_POIs.txt contains all venue data with 7 columns, which are:
+    1. Venue ID (Foursquare) 
+    2. Latitude
+    3. Longitude
+    4. Venue category name (Foursquare)
+    5. Country code (ISO 3166-1 alpha-2 two-letter country codes)
+\
+  + File dataset_TIST2015_Cities.txt contains all 415 cities data with 6 columns, which are:
+Venue category ID (Foursquare)
+    1. City name
+    2. Latitude (of City center)
+    3. Longitude (of City center)
+    4. Country code (ISO 3166-1 alpha-2 two-letter country codes)
+    5. Country name
+    6. City type (e.g., national capital, provincial capital)
+\
+
+***
+
+### Data Preparation
+* #### Data Storage:
+Since the size of the whole data-set is huge to fit in memory and the analysis model will be working on one selected country per time, we stored the data in a Microsoft SQL database to make use of the power of indexes for faster retrieval of the data. Consequently each data-set file is stored in a table and indexed based on the columns usually used for selection and/or needed joins on it.\
+\
+**Names of the tables used for storage:**
+1. Checkins (for the file dataset_TIST2015_Checkins.txt).
+2. POI (for the file dataset_TIST2015_POIs.txt).
+3. City (for the file dataset_TIST2015_Cities.txt).\
+\
+Checkins table contains the information about the check-in actions, including User_Id, Venue_ID and Chk_time. Chk_time is a calculated column that combines the UTC_Time and Offset columns from the original data-set to calculate the local time of the check-in for when analyzing the data for the specified country.\
+\
+* #### Date-Time modification:
+In the provided data-set, the check-in time column (UTC_Time) is provided in a string format which should be modified to appropriate format, then the offset is added to it to get the local time.\
+**Example:**\
+UTC_Time: Tue Apr 03 19:51:40 +0000 2012\
+**Changes to:**\
+Chk_time: 2012-04-03 14:51:40.000\
+\
+Used sql-script:
+```{sql eval=FALSE}
+  SELECT T.User_ID,T.Venue_ID,
+  DATEADD(MINUTE,CAST(Timezone_offset as int),CAST(Yr+'-'+mon+'-'+ltrim(dy)+' '+tim as datetime)) Chk_time
+  FROM (SELECT chk.*,
+  SUBSTRING(UTC_time, 27, CHARINDEX(' ',UTC_time)) Yr,
+  case SUBSTRING(UTC_time, 5, CHARINDEX(' ',UTC_time))
+  when 'Jan' then '01'
+  when 'Feb' then '02'
+  when 'Mar' then '03'
+  when 'Apr' then '04'
+  when 'May' then '05'
+  when 'Jun' then '06'
+  when 'Jul' then '07'
+  when 'Aug' then '08'
+  when 'Sep' then '09'
+  when 'Oct' then '10'
+  when 'Nov' then '11'
+  when 'Dec' then '12'
+  end as mon ,
+  SUBSTRING(UTC_time, 8, CHARINDEX(' ', UTC_time)-1) dy,
+  substring(UTC_time,11,CHARINDEX(' +0',UTC_time)-11) tim
+  FROM dbo.Checkins chk
+  ) T
+```
+Then the result should replace the dbo.Checkins table.
+
+* #### Venue categories hierarchy:
+Venues in foursquare are modeled in a hierarchical struture, users are able to check-in into any place and select any type from any level they prefer.\
+**A sample from the venues category hierarchy on Foursquare website**\
+![](C:/Users/Ismail/Desktop/OVGU/DKE Subjects/Data Science with R/Foursquare project/Global-scale Check-in Dataset/Screenshots/Venue_categories_Hierarchy.JPG)\
+\
+**A sample data with the original columns before including the hierarchy**\
+```{r }
+chk_poi_country %>% head() %>% select(User_ID, Venue_ID, Venue_Category_Name)
+```
+\
+Since the check-ins in the data-set are on different levels from the venues hierarchy, and the hierarchy of the venues was not extracted or provided with the data-set, a csv data-set of the hierarchies was downloaded from [Zoltrix's Github](https://gist.github.com/Zoltrix/d69a52e9f91f4211be93eea1f1398424?fbclid=IwAR0AWaTUrTVD7f4hjFqLS9sM2OuQriFqp6K1SYkYYEONhzBTEHouWZD7BvE) to be able to unify the levels of venues for the analysis.\
+The csv file "venue_subcategories.csv" contains three columns "venue", "venue_category" and	"level". Each venue is stored with each of it's parent levels in a separate row.\
+![](C:/Users/Ismail/Desktop/OVGU/DKE Subjects/Data Science with R/Foursquare project/Global-scale Check-in Dataset/Screenshots/Venue_categories_csv.JPG)\
+\
+Since the dataset was collected for the years 2012 and 2013, while the venue categories hierarchy file was recently collected there were some discrepancies between the old and the recent hierarchy. To handle these discrepancies a new file,"venue_subcategories_complementary.csv", was manually created correcting the old values to be matching with the new hierarchy.\
+\
+Also the highest level categories were added to the list inside the code as they were only included in the file as parents but never as available categories.\
+```{r eval=FALSE}
+# hanlde main categoies (present only as parent category)
+main_venue <- venue_sub_cat %>% filter(level == 0) %>% select(venue_category) %>% unique()
+main_venue<- add_column(main_venue, venue = main_venue$venue_category, .before = "venue_category")
+main_venue$level <- 0
+
+venue_sub_cat <- rbind(venue_sub_cat,main_venue)
+```
+\
+Then 2 columns are added to the data "venue_category_lvl_one" and "venue_category" which add the level zero parent of the checked-in venue and the level one parent\
+**A sample data after including the hierarchy columns**\
+```{r}
+chk_poi_country %>% head() %>% select(User_ID, Venue_ID, Venue_Category_Name, venue_category_lvl_one, venue_category)
+```
+* #### Reverse Geo Coding funtion:
+POI:
+The POI table contains the following columns:
+Venue_ID,Venue_category_name,Latitude,Longitude,Country_code
+The most important and needed part which is the city information is missing in the dataset. (each venue belongs to which city)
+We applied the "Reverse geocoding" solution inspired by [blog.exploratory.io](https://blog.exploratory.io/reverse-geocoding-part-1-using-boundary-data-with-geojson-45c2464bbd22).\
+This sample is for Japan. Japan is divided into 47 prefectures.\
+In this webpage, Find_Pref function  is implemented which takes longitude/latitude vectors and returns a vector of prefecture names. Other input needed for this purpose is the GeoJSON file of the country based on the desired segmentation level (state,city,prefecture and etc.)\
+```{r eval=FALSE}
+Rev_Geo$city <-find_pref(POIs$Longitude,POIs$Latitude)\
+```
+Then we save the modified table in database using dbWriteTable. Since it is a lookup function in a huge json file, it takes a long time to get the results.\
+For US, we also repeated same steps, but we get considerable null values for some states because the geojson files were not complete so we manipulated null data manually with looking up them in [Latlong.net](https://www.latlong.net/Show-Latitude-Longitude.html).\
+The reason why we are not using google API is the restriction in the count of requests.\
+
+***
+
+### Simple Analysis
+In the simple analysis section, we get a high level preview of the check-ins for the selected country, like drawing a histogram to exploit the trend of check-ins and detect if there are any missing or unexpected patterns, knowing the most checked-in venues in the country and knowing if there are any key factor that is driving the data for example active-users.
+```{r eval=FALSE}
+checkins_hist <- ggplot(chk_poi_country, aes(x = date(Chk_time))) +
+  geom_histogram(bins = 18, col="red", aes(fill=..count..)) +
+  scale_fill_gradient("Count", low = "red", high = "green") +
+  ggtitle(paste("Checkins Histogram for", country_name)) +
+  scale_x_date(labels = date_format("%Y-%b"),date_breaks = "3 months") +
+  scale_y_continuous(labels = scales::comma) + 
+  ylab("Count Checkins") + 
+  xlab("Year and Month") +
+  theme_bw()
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(checkins_hist)
+```
+As you can see in the plot above, not all months have the same amount of check-ins, months vary greatly,which shows that the provided data-set doesn't cover the whole data of foursquare or skipped some.
+```{r eval=FALSE}
+# a cumulative density graph based on number of checkins by user
+User_chk_count_data <- chk_poi_country %>%
+  group_by(User_ID) %>%
+  summarize(count = n()) %>%
+  arrange(count)
+
+User_chk_count_data$cumsum <- cumsum(User_chk_count_data$count)
+User_chk_count_data$prob <- cumsum(User_chk_count_data$count) / sum(User_chk_count_data$count)
+User_chk_count_cdf <- ggplot(data = User_chk_count_data, aes(x= seq_along(User_ID),y = prob)) +
+  geom_point() +
+  ggtitle(paste("Distribution of checkins by users in", country_name)) +
+  xlab('Number of users') +
+  ylab('Distribution') +
+  geom_hline(yintercept = 0.5,linetype="dotted", size = 2, color = "red")
+```
+
+```{r echo=FALSE, out.width = '100%'}
+plot(User_chk_count_cdf)
+```
+For the checkin-ins distribution, it is clear that there are a small amount of users, around 15-20%, making 50% of the checkins of the country, while the remaining users contribute with the remaining 50%.\
+There are 9 main categories that contain all venues in foursquare as follows:
+\
+```{r eval=FALSE}
+# counts of top categories
+Top_cat_data <- chk_poi_country %>%
+  count(Country_Code, venue_category,sort = TRUE)
+
+# Bar Chart for top categoies ordered by count
+Top_cat_bar <- ggplot(Top_cat_data, aes(x = reorder(venue_category, -n), y=n)) +
+  geom_bar(stat = 'identity', fill = "Blue") +
+  xlab('Venue_Category') +
+  ylab('Check-ins count')+
+  ggtitle(paste("Top Categories in", country_name)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_y_continuous(labels = scales::comma)
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top_cat_bar)
+```
+
+```{r eval=FALSE}
+# counts of top 10 sub-categories
+Top10_subcat_data <- chk_poi_country %>%
+  filter(!is.na(venue_category_lvl_one)) %>%
+  count(Country_Code, venue_category_lvl_one,venue_category,sort = TRUE) %>%
+  head(n = 10)
+
+# Bar Chart for top sub-categoies ordered by count
+Top10_subcat_bar <- ggplot(Top10_subcat_data, aes(x = reorder(venue_category_lvl_one, -n), y=n)) +
+  geom_bar(stat = 'identity', fill = "Blue")+
+  xlab('Venue_SubCategory') +
+  ylab('checkin_count')+
+  ggtitle(paste("Top-10 Sub-categories in", country_name)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_y_continuous(labels = scales::comma)
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top10_subcat_bar)
+```
+\
+**Temporal Analysis:**
+Temporal analysis enables examining and modeling the behavior of the check-ins over time. It can be used to determine whether and how concentrations are changing over time. The behavior of check-ins over time can be modeled as a function of previous data points of the same series. This can help identify which activities in the selected country are commonly done on different time occasions. For example which are common during weekends vs. weekdays, what are popular day activities vs night activities.\
+\
+In the following section we will exploit the top categories of the country based on different temporal levels:\
+\
+* #### Check-ins distribution over hours:
+The distribution of check-ins along the 24 hours of the day, gives a quickview of which activities are usually done at what times of the day.
+```{r eval=FALSE}
+# Density chart for distribution of top sub-categories over hours of the day
+Top_subcat_distr_hours_data <- chk_poi_country %>%
+  filter(chk_poi_country$venue_category_lvl_one %in%
+           Top_subcats$venue_category_lvl_one) %>%
+  mutate(time = hour(Chk_time) + minute(Chk_time)/60+ seconds(Chk_time)/3600)
+
+Top_subcat_distr_hours_density <- ggplot(Top_subcat_distr_hours_data, aes(x= time, y=..density.. ,fill= venue_category_lvl_one)) +
+  geom_density(position = "stack", alpha = 0.6) +
+  scale_x_continuous(name="Hours of the day", limits=c(0, 24), breaks = c(0:24))
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top_subcat_distr_hours_density)
+```
+* #### Check-ins distribution over days:
+The distribution of check-ins over the days of the week on the other hand gives another point of view regarding what activities are usually done during weekdays and what other activities are done on the weekends. We preferred to plot all 7 days together and not split them to seperate weekdays and weekends charts because weekdays and weekends can vary according to the country, for example in Europian countries weekends are Saturdays and Sundays, while in the Middle East countries weekends are Fridays and Saturdays.
+```{r eval=FALSE}
+# Multi-bar chart for the distribution of top categories over the week days
+Top_subcat_distr_week_data <- chk_poi_country %>%
+  filter(chk_poi_country$venue_category_lvl_one %in% Top_subcats$venue_category_lvl_one) %>%
+  count(venue_category_lvl_one,checkin_day= wday(Chk_time, label = TRUE))
+
+Top_subcat_distr_week_multibar <- ggplot(Top_subcat_distr_week_data, aes(x= checkin_day,y= n, fill= venue_category_lvl_one)) +
+  geom_bar(stat = 'identity', position = "dodge") +
+  geom_smooth(method = "lm") +
+  ylab("Count Checkins") +
+  xlab("Checkin Day")
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top_subcat_distr_week_multibar)
+```
+* #### Check-ins distribution over months:
+The distribution of check-ins over the months gives even a wider scope of view, one can determine the activities and places people like to visit at different seasons of the year. For the same reason as the distribution over days, we chose not to group months into seasons because seasons in the Southern Hemishpere are the opposite of the Northern Hemishpere.
+```{r eval=FALSE}
+# for distribution of top sub-categories over months of the year
+Top_subcat_distr_month_data <- chk_poi_country %>%
+  filter(chk_poi_country$venue_category_lvl_one %in%
+  Top_subcats$venue_category_lvl_one) %>%
+  count(venue_category_lvl_one, DT= date(paste(year(Chk_time), "-", month(Chk_time), "-01", sep="")))
+
+Top_subcat_distr_month_density <- ggplot(Top_subcat_distr_month_data, aes(x= DT, y= n,fill= venue_category_lvl_one)) +
+  geom_area(stat = "identity", alpha = 0.6) +
+  scale_x_date(labels = date_format("%Y-%b"), date_breaks ="3 months") +
+  #scale_y_continuous(labels = "comma") +
+  xlab("Year and Month") +
+  ylab("Count Checkins") +
+  guides(fill = guide_legend(title = "venue sub-category"))
+  theme_bw()
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top_subcat_distr_month_density)
+```
+***
+
+### Frequent Pattern Analysis
+Frequent Pattern Mining is a data Mining subject that aims at finding interesting relationships among the items in a database, in our case items are the venues or venue categories that the users visit. Frequent Pattern Mining defines Frquent itemsets to find those relationships. Frquent itemsets can be defined as the venues that appear in many transactions, then these relationships are presented as a collection of if-then rules, called association rules.\
+When we thought about using frequent pattern we thought about building a solid base for recommendations for users and businesses based on existing patterns for the country.\
+\
+**Choosing the venue category level to work on:**
+For the frequent pattern mining, we will be using the level one category column "venue_category_lvl_one" because the "Venue Category Name" column of the data-set contains venues from different levels which will result in generation of misleading association rules like "Movie Theater=>Arts & Entertainment" and "Airport Gate=>Airport" which is joining the object with it's parents in the hierarchy.\
+Also we excluded using the main venues column "venue_category" because it contains only 9 categories which will result in very trivial association rules and losing the interesting association rules between detailed venues, an example for a rule that will be lost by using "venue_category" is the rules "Salsa Club=>Basketball Stadium" because both venues fall under the category "Arts & Entertainment".\
+\
+**Transactions Preparation:**
+'arules' is a library that provides an infrastructure for representing, manipulating and analyzing transaction data and patterns (frequent itemsets and association rules). It provides implementations of the association mining algorithms Apriori and Eclat.\
+In order to process data by 'arules', it needs to be stored as instances of the class transaction, this is done as follows:\
+1.We select from our check-ins data for each user the places he has been to on the same day and place them all in a row separated by commas, this format of storing transactions is called "basket".
+2. We store the data in a csv file.
+3. We the csv file as transactions .
+4. We pass the transactions to the algorithm.
+```{r eval=FALSE}
+# Combine all places visited by user in each day in a cell (userid,date,categories)
+Freq_pattern_data <- chk_poi_country %>%
+  filter(!is.na(nxt_venue_cat_lvl_one)) %>%
+  group_by(User_ID,Chk_time = date(Chk_time)) %>%
+  arrange(Chk_time) %>%
+  summarise(visited  = paste(venue_category_lvl_one, collapse =","))
+
+Freq_pattern_data$User_ID <- NULL
+Freq_pattern_data$Chk_time <-NULL
+Freq_pattern_data %>% ungroup()
+
+write.csv(Freq_pattern_data,"Trn.csv", quote = FALSE, row.names = FALSE)
+
+Freq_pattern_trn <- read.transactions(file = "Trn.csv", format = 'basket', sep=',', rm.duplicates = FALSE, skip = 1)
+```
+Then see a summary of the trasactions using:
+```{r echo=FALSE}
+summary(Freq_pattern_trn)
+```
+**Algorithms comparison:**
+In order to decide between the 2 algorithms implemented in 'arules' we ran the following time test to decide which will be better to use for our analysis
+```{r eval=FALSE}
+start.time <- Sys.time()
+association.rules <- eclat(Freq_pattern_trn, parameter = list(supp=0.0001, minlen=3))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+```
+```{r echo=FALSE}
+start.time <- Sys.time()
+association.rules <- eclat(Freq_pattern_trn, parameter = list(supp=0.0001, minlen=3))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+```
+```{r eval=FALSE}
+start.time <- Sys.time()
+association.rules <- apriori(Freq_pattern_trn, parameter = list(supp=0.0001, conf=0.05, minlen=3))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+```
+```{r echo=FALSE}
+start.time <- Sys.time()
+association.rules <- apriori(Freq_pattern_trn, parameter = list(supp=0.0001, conf=0.05, minlen=3))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+```
+By checking the test it seems that Eclat is performing better with a difference (<= 0.4 sec), but since the difference between the 2 algorithms is very small in this case, we decided to proceed with Apriori, because it provides more detailed information as hwen running the algorithm than Eclat which might finish processing faster but needs further processing to reach the same level of information. Apriori provides in it's results the left-hand-side, right-hand-side, support, confidence and lift for each rule, while Eclat only provides the whole frequent itemset and it's support value.\
+```{r}
+inspect(association.rules[1:10])
+```
+
+\
+**Creating value from generated rules:**
+We based out analysis on the lift factor. Lift is defined as the factor by which, the co-occurence of A and B exceeds the expected probability of A and B co-occuring, had they been independent. So, higher the lift, higher the chance of A and B occurring together.
+![](C:/Users/Ismail/Desktop/OVGU/DKE Subjects/Data Science with R/Foursquare project/Global-scale Check-in Dataset/Screenshots/Apriori.JPG)
+picture and definition taken from [Selva Prabhakaran's blog](http://r-statistics.co/Association-Mining-With-R.html).\
+\
+**Recommendations for businesses: **
+Using association rules can help as a good base for businesses, for example let's take a new burger place that wants to know the best potential places to open. Based on our apriori rules we can recommend places based on the lift value from the generated rules.\
+for exmaple: {Bakery,Donut Shop}=>{Burger Joint}
+```{r eval=FALSE}
+Burger_rules <- apriori(Freq_pattern_trn, parameter =  list(supp=0.00001,conf=0, maxlen=3),appearance = list(default="lhs",rhs = "Burger Joint"))
+```
+```{r echo=FALSE}
+inspectDT(Burger_rules)
+```
+
+As mentioned by [DataCamp's tutorial for apriori](https://www.datacamp.com/community/tutorials/market-basket-analysis-r) using the library 'arulesViz' can give a more interesting and interactive graph for displaying apriori rules for our example:
+
+> Graph-Based Visualizations: Graph-based techniques visualize association rules using vertices and edges where vertices are labeled with item names, and item sets or rules are represented as a second set of vertices. Items are connected with item-sets rules using directed arrows. Arrows pointing from items to rule vertices indicate LHS items and an arrow from a rule to an item indicates the RHS. The size and color of vertices often represent interest measures.
+
+```{r eval=FALSE}
+# create a graphical chart for top 10 rules and items
+Top_Burger_rules <- head(Burger_rules, n= 10 , by = "lift")
+```
+```{r echo=FALSE, out.width = '100%'}
+plot(Top_Burger_rules, method = "graph",  engine = "htmlwidget")
+```
+\
+**Recommendations for users: **
+Likeweise, the same way we can use apriori rules to recommed places for users, by defining user-segments (ex: working people or university students) we can recommend venues based on analyzing the lifestyle of those user-segments. This can be achieved by filtering the rules having those segments as the LHS.
+
+***
+
+### Sequence Pattern Analysis
+> Sequential pattern mining is a topic of data mining concerned with finding statistically relevant patterns between data examples where the values are delivered in a sequence. It is usually presumed that the values are discrete, and thus time series mining is closely related, but usually considered a different activity. Sequential pattern mining is a special case of structured data mining.
+
+Definition from Wikipedia's [Sequential_pattern_mining](https://en.wikipedia.org/wiki/Sequential_pattern_mining).\
+
+We based our sequenial pattern analysis on the idea of frequent 2-itemsets, for this we had to follow a set of steps.\
+\
+- Group the check-ins data user\
+- Order the check-ins of the user by date and time\
+- For each check-in ation of the user, get the next checkin place, longitude, latitude and time of check-in\
+- Calculate the inter-checkin time (IC_Time) in minutes\
+- Calculate the inter-checkin distance (IC_Dist) in km using the function distGeo\
+Note: For the next check-in place we lookup the next checked-in place by the user from original data set(nxt_venue_cat_name), the level one category (nxt_venue_cat_lvl_one) and the main category (nxt_venue_cat)
+
+```{r eval=FALSE}
+# add columns calculating the difference between consecutive checkins in terms of time (min) and distance (km)
+chk_poi_country <- chk_poi_country %>%
+  group_by(User_ID) %>% 
+  arrange(Chk_time) %>% 
+  mutate(nxt_chk_time = lead(Chk_time),
+         IC_Time = (nxt_chk_time - Chk_time) / 60,
+         nxt_chk_lon = lead(Longitude),
+         nxt_chk_lat = lead(Latitude),
+         IC_Dist = distGeo(matrix(c(Longitude, Latitude), ncol = 2),matrix(c(nxt_chk_lon, nxt_chk_lat), ncol = 2))/1000,
+         nxt_venue_cat_name = lead(Venue_Category_Name),
+         nxt_venue_cat = lead(venue_category),
+         nxt_venue_cat_lvl_one = lead(venue_category_lvl_one)
+        )
+
+chk_poi_country <- ungroup(chk_poi_country)
+```
+
+**A sample of the data after adding the next venue columns**
+```{r }
+chk_poi_country %>% head() %>% select(User_ID,Venue_Category_Name,nxt_venue_cat_name,venue_category_lvl_one,nxt_venue_cat_lvl_one,venue_category,nxt_venue_cat)
+```
+In our model we use the library (networkD3) for the visualization for our sequenced rules, and specifically a flow chart graph type called "Sankey diagram".\
+To prepare the rules to be plotted, we do grouping on the check-in venue and it's next check-in venue, and then we do a count operation. Then based on a combination of selected support, we select the rules satisfying these selected support values and plot them using the sankey diagram.\
+For the data below, we combine 20 rules that staisfy a support of 0.0002, 15 rules that satisfy a support of 0.0004 and 10 rules that satisfy a support of 0.0007 then plot them together.\
+Since each link between two venue categories represents a frequent 2-itemset rule, the graph shows possible combinations of different rules together. What we find interesting about using this method is that it might produce sequences that don't appear in the data-set, and by choosing appropriate support values, we  can compare them to frequent itemsets from apriori and choose non existing rules as a base for recommendations for users. Then feedback can be collected from the users by rating those suggestions, for clarfication we will give an example after plotting the graph.
+```{r eval=FALSE}
+# create a Sankey diagram to show frequent movement from one sub-category to the other
+# sankey for level one categories
+total <- chk_poi_country %>%
+  filter(!is.na(nxt_venue_cat_lvl_one),
+         !( venue_category_lvl_one == nxt_venue_cat_lvl_one)) %>%
+  group_by(venue_category_lvl_one,nxt_venue_cat_lvl_one) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+supp <- 0.0002
+supp_count <- sum(total$Count) * supp
+
+supp_1 <- 0.0004
+supp_count_1 <- sum(total$Count) * supp_1
+
+supp_2 <- 0.0007
+supp_count_2 <- sum(total$Count) * supp_2
+
+Sequence_chk_agregated_level_one <- chk_poi_country %>%
+  filter(!is.na(nxt_venue_cat_lvl_one),
+         !( venue_category_lvl_one == nxt_venue_cat_lvl_one)) %>%
+  group_by(venue_category_lvl_one,nxt_venue_cat_lvl_one) %>%
+  summarize(Count = n()) %>%
+  ungroup() %>%
+  filter(Count >= supp_count) %>%
+  top_n(20,-Count)
+
+Sequence_chk_agregated_level_one_1 <- chk_poi_country %>%
+  filter(!is.na(nxt_venue_cat_lvl_one),
+         !( venue_category_lvl_one == nxt_venue_cat_lvl_one)) %>%
+  group_by(venue_category_lvl_one,nxt_venue_cat_lvl_one) %>%
+  summarize(Count = n()) %>%
+  ungroup() %>%
+  filter(Count >= supp_count_1) %>%
+  top_n(15,-Count)
+
+Sequence_chk_agregated_level_one_2 <- chk_poi_country %>%
+  filter(!is.na(nxt_venue_cat_lvl_one),
+         !( venue_category_lvl_one == nxt_venue_cat_lvl_one)) %>%
+  group_by(venue_category_lvl_one,nxt_venue_cat_lvl_one) %>%
+  summarize(Count = n()) %>%
+  ungroup() %>%
+  filter(Count >= supp_count_2) %>%
+  top_n(10,-Count)
+
+Sequence_chk_agregated_level_one <- rbind(Sequence_chk_agregated_level_one,Sequence_chk_agregated_level_one_1,Sequence_chk_agregated_level_one_2)
+
+Sequence_chk_agregated_level_one$venue_category_lvl_one <- as.character(Sequence_chk_agregated_level_one$venue_category_lvl_one)
+Sequence_chk_agregated_level_one$nxt_venue_cat_lvl_one <- as.character(Sequence_chk_agregated_level_one$nxt_venue_cat_lvl_one)
+```
+For the sankey diagram to work it needs to be provided with nodes and links.\
+Nodes is the list of venue categories with an ID specified for each venue category.\
+While links is given a source node, a target node and a value parameter which is the count in our case.
+```{r eval=FALSE}
+# create a list of unique activities and assign IDs to them (we combine both venue and next venue
+# in case a venue was always last visited it will be then excluded)
+activities_id_level_one <- (1:length(unique(c(Sequence_chk_agregated_level_one$venue_category_lvl_one, Sequence_chk_agregated_level_one$nxt_venue_cat_lvl_one)))) - 1
+# set the names value of IDs to be the name of the venue
+names(activities_id_level_one) <- unique(c(Sequence_chk_agregated_level_one$venue_category_lvl_one, Sequence_chk_agregated_level_one$nxt_venue_cat_lvl_one))
+
+# add column source and target to 
+Sequence_chk_agregated_level_one$source <- activities_id_level_one[Sequence_chk_agregated_level_one$venue_category_lvl_one]
+Sequence_chk_agregated_level_one$target <- activities_id_level_one[Sequence_chk_agregated_level_one$nxt_venue_cat_lvl_one]
+
+nodes_level_one <- data.frame(node=activities_id_level_one, name=names(activities_id_level_one))
+links_level_one <- data.frame(source=Sequence_chk_agregated_level_one$source, target=Sequence_chk_agregated_level_one$target, value=Sequence_chk_agregated_level_one$Count)
+```
+Now that the data is prepared, let's plot the sankey diagram.
+```{r, out.width = '100%'}
+networkD3::sankeyNetwork(Links = links_level_one, Nodes = nodes_level_one, 
+                         Source = 'source', 
+                         Target = 'target', 
+                         Value = 'value', 
+                         NodeID = 'name',
+                         units = 'count', 
+                         nodePadding = 5,
+                         width = 1500,
+                         height = 1000,
+                         fontSize = 20)
+```
+Considering the graph above, let's consider the path {Bookstore => Coffee Shop=> Park=> Metro Station=> Museum}, this path might not be appearing in our data-set as a frequent 5-itemset, but by accepting support values of 0.0007,  0.0004 and 0.0002 for our data-set and knowing that {Bookstore => Coffee Shop} has a support of 0.0004, {Coffee Shop=> Park} has a support of 0.0002, {Park=> Metro Station} has a support of 0.0007 and {Metro Station=> Museum} has a support of 0.0002. Based on the previous assumption of accepting those support values we can use this analysis as an input to recommender systems and businesses.\
+\
+
+### Spatial Clustering
+Division of the region based on activity density which activity is defined by venue category.
+This leads us to Spatial data Clustering:\
+"activity zone" is a term which we assign to each cluster.\
+Spatial clustering can be simplified as a vector with two values like x,y which in this case is represented with longitude and latitude of Venues. In other words spatial clustering problem is exactly like clustering of 2-d vectors. This clustering also can be done via density-based methods or distance-based methods. \
+Distance-based methods have two weakness which leads to be not suitable for spatial data clustering, first they need to specify the number of clusters as an input and second they allocate all objects to the clusters and never identify noises. Although we are aware of mentioned weak points, we first try dbscan as a method of density based and later k-means as a candidate of distance based.
+For simplicity we choose the data of one candidate prefecture from Japan check-ins which here is Hiroshima.\
+\
+**DBSCAN clustering:**\
+DBSCAN detects clusters which are present in the data space as dense areas. These clusters are differentiated from regions with low density (noises).clusters may have an arbitrary shape and the points inside a cluster may be arbitrarily distributed.\
+DBSCAN requires two parameters: eps(size of the epsilon neighborhood) and the minimum number of points required to form a cluster (minPts). A node which does not meet minPts in its eps neighbourhood and also is not located in a sufficiently sized eps environment of a different point, will be labeled as noise(more detailed description of this algorithm is beyond the scope of this work).\
+Minpts is often set to be dimensionality of the data plus one or higher as per [rdocumentation.org](https://www.rdocumentation.org/packages/dbscan/versions/1.1-3/topics/dbscan). In our case we tried both 3 and 5, which gives almost the same result.
+To find the suitable value for eps the knee in kNNdistplot can be used.\
+
+
+```{r}
+dbs %>% head()
+```
+
+```{r}
+kNNdistplot(dbs[,3:4], k = 5 ) 
+#where the k is number of nearest neighbors used (use minPoints)
+abline(h = 0.016, col="red",lty = 2)
+#We can see that knee is around a distance of 0.016.
+```
+
+Now we can do the clustering:\
+```{r eval=FALSE}
+clusters <- dbscan(select(dbs, 'Latitude', 'Longitude'), eps = 0.016)
+dbs$cluster <- clusters$cluster
+groups  <- dbs %>% filter(cluster != 0)
+noise  <- dbs %>% filter(cluster == 0)
+```
+
+Which plots look like- black points are the noises:\
+```{r echo=FALSE}
+plot(dbscan_plot)
+```
+\
+Let's have a look on results plotted on the map:\
+```{r echo=FALSE}
+dbscan_map
+```
+\
+From the visualization we conclude that the output of dbscan for other clusters except from the cluster 1 (green-blue one ) is the desired one.Cluster 1 is so huge and could be broken down to smaller areas.\
+\
+**K-means clustering:**\
+Let's try it with k-means and see the difference:\
+We take the advantage of DBSCAN results and excluded the noises from the dataset.So we used groups dataset for k-means instead of dbs.\
+```{r eval=FALSE}
+km <- kmeans(groups_km[,3:4],centers = 3, nstart = 5)
+groups_km$cluster <-km$cluster
+```
+
+If we took silhouette metric to choose appropriate cluster count, it will show us that k=3 results the max average silhouette. Also with repeating clustering with K=5,9, we realized that the main difference- partitioning afterwards is happening at the biggest cluster(on the map green area in the middle) which is mostly the same area of cluster one in DBSCAN. Consequently we decided to combine both clustering methods. Take the advantage of DBSCAN for smaller dense areas and apply k-means on bigger clusters resulted from DBSCAN.\
+```{r echo=FALSE}
+plot(k_means_plot)
+```
+```{r echo=FALSE}
+k_means_map
+```
+
+***
+
+### Temporal Clustering
+We are interested in finding similar patterns of check-in frequency over time dimension.\
+This leads us to temporal clustering. Check-ins for each venue based on time dimension can be represented as time series. \
+**Time series clustering:** let's assume that for each activity(venue category) there is a timeserie of check-ins over the defined time dimension. Which time dimension can be based on different granularity levels:
+- Time intervals in a day
+- Type of days (workday-weekday)
+- Seasons
+- Or other informative level
+Here we just focus on the first level - considering data as hourly check-ins.\
+\
+data preparation-manipulations for further steps:\
+- Since we are not interested in whole categories, we will choose Top K=30 popular venues for a specific country dataset.\
+- Grouping checkins based on those popular venues and meanwhile based on hour of the checkin.\
+- Making pivot table and consequently matrix from it.\
+```{r}
+time_cat_matrix %>% head()
+```
+To partition time series data into groups based on similarity or distance, so that time series in the same cluster are similar, we have to make decisions in following areas:\
+
+- Scale Type\
+- Distance Type\
+- Clustering Method\
+\
+**Scaling:** to make the variables comparable since they are not in the same scale we have to do scaling. Two possible options are normalization and standardization. Here we chose standardization.The values in each row are standardized by subtracting their minimum and dividing by their range.By doing  this the data will be scaled to mean=0, sd=1.\
+```{r eval=FALSE}
+time_cat_matrix_scaled <- t(scale(t(time_cat_matrix))) 
+## Centers and scales matrix row-wise
+```
+```{r out.width = '100%'}
+heatmap(time_cat_matrix_scaled,Colv=NA, scale='none',col=palette,xlab = "Hours", ylab = "Category")
+```
+\
+This heatmap shows that how selected activities are corrolated based on time dimension and density of the check-ins. For example we can see venues like Bar and sake bar are late night activities.Or people start checking in stores starting from 10AM which becomes so crowded between 5-7 PM which is mostly the end of the working day. Transportaton related venues have two most visiting periods of time. One in the morning 7-9AM and the other one in the evening around 6PM which is a prove of moving people between their working and leaving areas.\
+**Distance measure:**To use this scaled matrix later in hierarchical clustering we have to derive distance matrix from it.here we calculate two distances:\
+1. Correlation-based distance
+```{r eval=FALSE}
+time_cat_cor <- cor(t(time_cat_matrix_scaled), method="pearson")
+time_cat_cor_dist <- as.dist(1-time_cat_cor)
+```
+2-euclidean distance
+```{r out.width = '100%'}
+time_cat_eucl <- dist(time_cat_matrix_scaled, method = "euclidean")
+fviz_dist(time_cat_eucl, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+```
+\
+This visulaization of distance matrix indicates the venues which are most similar to each other (smallest distance) with green color. Beside from 4 big green squares along the diagonal,there are other few venues which with weak degree are similar to each other. Also we can see that universities are not similar to Bars which the dark orange color respresents it.\
+\
+**Clustering method:**\
+Candidates:\
+Partitioning algorithms: k-means, PAM (Partitioning Around Medoids)\
+Hierarchical algorithms: agglomerative clustering (hclust)\
+We will mostly focus on k-means and hierarchical agg. Clustering.\
+We already know drawbacks of the k-means. We should have sense of number of clusters in advance. Also it is making some assumptions about the distribution of data.Results can be highly affected with the initial cluster centroids.On the other hand, result of hclust is plotted as dendogram which we can use it to make decisions at which height we are going to cut the tree to form our clusters. Even by considering these points we will examine both methods for our data. To have a comparison between these methods we will perform a validation test using clValid package as per [sthda.com](http://www.sthda.com/english/wiki/print.php?id=243).\
+clValid is offering 3 different types of clustering validation measures:\
+- Internal validation\
+- Stability validation\
+- Biological validation\
+Here we mostly focus on internal validation measures which contains following items(for details about the other ones you can refer to the mentioned web site):\
+**Connectivity:** degree of connectedness of the clusters,corresponds to what extent items are placed in the same cluster as their nearest neighbors in the data space, the range of value is between 0 and infinity and lower values are prefered.\
+The other two ones combine measures of compactness and separation of the clusters:\
+**Average Silhouette width**\
+Silhouette coefficient as per [datanovia](https://www.datanovia.com/en/lessons/cluster-validation-statistics-must-know-methods/):\
+The silhouette analysis measures how well an observation is clustered and it estimates the average distance between clusters. The silhouette plot displays a measure of how close each point in one cluster is to points in the neighboring clusters. Values of silhouette width ranges from [-1,1] - poorly clustered to well clustered.\
+**Dunn index :** as per [wikipedia](https://en.wikipedia.org/wiki/Dunn_index) the aim is to identify sets of clusters that are compact, with a small variance between members of the cluster, and well separated, where the means of different clusters are sufficiently far apart, as compared to the within cluster variance.It has a value between 0 and infinity and bigger values are prefered.\
+summary of validity test:\
+```{r}
+summary(valid_test)
+```
+since internal validation metrics do not help us to choose between methods in this case, we decided to do experiments for both kmeans and hierarchical clusterings.\
+**K-means clustering**\
+Determining the optimal number of clusters\
+Although validation test provides also the number of clusters for related measure,we can also run other test using following popular methods as per [datanovia](https://www.datanovia.com/en/lessons/determining-the-optimal-number-of-clusters-3-must-know-methods/):\
+1- Elbow method: applying different K(number of clusters) and calculating total within-cluster sum of square (WSS).The total WSS measures the compactness of the clustering and we want it to be as small as possible. Consequently this value should be minimized and we will stop at that point where adding new cluster is not helping to decrease it.\
+
+```{r}
+fviz_nbclust(time_cat_matrix_scaled, kmeans, method = "wss") +
+  geom_vline(xintercept = 4, linetype = 2)+
+  labs(subtitle = "Elbow method")
+```
+\
+the elbow method is sometimes ambiguous. An alternative is the average silhouette method.\
+
+2- Average silhouette method\
+Average silhouette method computes the average silhouette of observations for different values of k. Within desired range of K, the best one is that which maximizes the average silhouette.\
+```{r}
+fviz_nbclust(time_cat_matrix_scaled, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method")
+```
+\
+3- Gap statistic method: here we will not use this method since the result for best K was really different from 2 other methods and after visualizing the clusters based on it we realized it is not our desired clustering result. (for more details you can refer to the mentioned website.)\
+\
+Based on the results we choose candidate(s) for K - in this case k=5.We focus on silhouette but any other validation measures can be chosen as well.\
+```{r}
+km.5 <- eclust(time_cat_matrix_scaled, "kmeans", k = 5, nstart = 25, graph = FALSE)
+fviz_silhouette(km.5, palette = "jco", ggtheme = theme_classic())
+
+```
+
+if in 'clusters silhouette plot' negative values appear this is the indicator of misclassification.\
+Applying k-means for 5 clusters:\
+```{r eval=FALSE}
+time_cat_kmeans<- kmeans(time_cat_matrix_scaled, 5, nstart = 25)
+
+```
+which contains form following clusters:\
+```{r echo=FALSE}
+sapply(unique(time_cat_kmeans$cluster),function(g)pivot_time_cat_c$Venue_Category_Name[time_cat_kmeans$cluster == g])
+```
+Also we can plot clusters based on first two principal components coordinates:\
+```{r out.width = '100%'}
+fviz_cluster(time_cat_kmeans, data=time_cat_matrix_scaled,geom = c("point","text"),main = 'k-means clusters')
+```
+\
+And here is the visualization of time series in each cluster:\
+```{r echo=FALSE, out.width = '100%'}
+kmeans_ts+facet_grid(cluster ~ .,scales = "free_y")
+```
+
+explanation can be added later\
+
+**Hierarchical clustering**\
+In agglomerative hierarchical clustering there are different aggregation methods which in this project we consider the following ones:\
+\
+Single: The distance between two clusters C1 and C2 is the minimum distance between two points x and y, which belongs to C1 and C2 respectively.\
+Drawback: even though many of the elements in each cluster may be very distant to each other, these single element causes these clusters to be merged and consequently chaining phenomenon happens.\
+\
+Complete : The distance between two clusters C1 and C2 is the maximum distance between two points x and y, with x in C1,y in C2.  \
+\
+Average : The distance between two clusters C1 and C2 is the mean of the distances between the pair of points x and y, where x in C1,y in C2.\
+\
+Ward : according to [rdocumentation](https://www.rdocumentation.org/packages/NbClust/versions/3.0/topics/NbClust),Ward method minimizes the total within-cluster variance. At each step the pair of clusters with minimum cluster distance are merged. To implement this method, at each step find the pair of clusters that leads to minimum increase in total within-cluster variance after merging. 
+\
+Cophenetic Distances for a Hierarchical Clustering
+\
+We choose one of mentioned methods based on cophenetic distance.\
+based on [stat.ethz.ch](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cophenetic.html) the cophenetic distance between two observations that have been clustered is defined to be the intergroup dissimilarity at which the two observations are first combined into a single cluster. High correlation between the original distance matrix and the cophenetic distance matrix shows that the dendrogram is an appropriate summary of the data.\
+Our experiments shows that average linkage provides highest value (`r cor(time_cat_cor_dist,coph_average)`) and we chose this method. Which the dendogram as is follows.
+\
+```{r out.width = '100%'}
+#coloring represents the clusters resulted from tree cut off k=5
+fviz_dend(time_cat_hclust_average, cex = 0.5, k = k_hclust, color_labels_by_k = TRUE, hang = -1)
+
+```
+
+```{r echo=FALSE,out.width = '100%'}
+hclust_ts+facet_grid(cluster ~ .,scales = "free_y")
+fviz_cluster(list(data = time_cat_matrix_scaled, cluster = cutree(time_cat_hclust_average,k_hclust)),main = 'H-clust clusters')
+
+```
+
+***
+
+
+### Challenges
+One of the sections which took from us an unexpected amount of time was the data preparation.
+In each step that we were progressing, we realized some changes are needed in data or something is missing there. That hindered us from reaching the level of detailed analysis that we promised.
+Also the amount of data was another barrier which caused us to do our analysis based on one country. Although we could have run the same code on different datasets of countries, the comparison between them would have needed more time.\
+\
+
+***
+
+### Conclusion and future work
+
+In conclusion, our analysis was able to identify trivial data patterns and other interseting potential patterns in each country. The trivial patterns were assuring to us that the analysis is working correctly. For example we found stereotypical lifestyles, so people in Japan have most of their check-ins in trains stations, restaurants and metro stations, while people in United States happen to check-in more into restaurants, bars and offices, also top check-ins in Turkey included Cafeterias, restaurants and shopping malls.\
+Beside finding the stereotypical lifestyles, we also found some interesting predictions from apriori results with high lift value. Using temporal and spatial clustering, we managed to discover which venue activities are combined together based on time and location independently.\
+\
+In the end we had the idea of combining our temporal and spatial clustering techniques with the frequent and sequence pattern mining results, but unfortunately we didn't have enough time to do that so we will mention it as a future work recommendation.
+The main idea was to combine each of the techniques as layers or filters above the data. If we take for example the data of "Hiroshima", we can apply spatial clustering as a filtering layer for defining areas of activity zones. Then we can add the result of temporal clustering as a second filtering layer for defining activity times on each of the zones defined in spatial clustering.\
+This will generate more meaningful patterns that can be combined with frequent itemset results from the apriori algorithm, to be used as input for recommender system engines.
+
+***
+
+### References
+\
+[^1]: Zheng, Yu, and Jason Hong. "The Preface of the 4th International Workshop on Location-Based Social Networks." Proceedings of the 2012 ACM Conference on Ubiquitous Computing. ACM, 2012..
